@@ -138,7 +138,7 @@ def build1(mode):
     tr_path,te_path = get_tr_te_paths(mode)
     gtr,_ = read_csv_hash_nvstring(tr_path)
     gte,_ = read_csv_hash_nvstring(te_path)
-    badcols = ['var_37']
+    badcols = []#['var_37']
     gtr = rm_cols(gtr,[IDCOL,YCOL]+badcols)
     gte = rm_cols(gte,[IDCOL,YCOL]+badcols)
     print("build1",len(gtr),len(gte))
@@ -166,12 +166,21 @@ def build2(mode):
 
 def build3(mode):
     x,xt,names = build1('sub')
+    N = x.shape[0]
     x = np.vstack([x,xt])
     scaler = StandardScaler()
     x = scaler.fit_transform(x)
-    N = x.shape[0]//2
+    x,xt = x[:N],x[N:]
+
+    x.sort(axis=1)
+    xt.sort(axis=1)
+    print(x[0,-10:])
+    M = 10
+    return x[:,-M:],xt[:,-M:],['max_%d'%i for i in range(M,0,-1)]
+    for i in range(x.shape[1]):
+        x[:,i] = x[:,i].argsort().argsort()
+    funcs = ['std']
     s = pd.DataFrame()
-    funcs = ['mean']#,'median','std','min','max']
     for func in funcs:
         s[func] = eval('np.%s(x,axis=1)'%func)
     x = s.values
@@ -377,6 +386,51 @@ def rm_cols(gdf,cols):
             del gdf[col]
     return gdf
 
+def one_zero_shuffle(x,y):
+    x = x.copy()
+    mask = y>0
+    x1 = x[mask].copy()
+    #x1 = x1.T
+    #np.random.shuffle(x1)
+    #x[mask] = x1.T
+    #return x,y
+    print(x[mask][0,-10:])
+    ids = np.arange(x1.shape[0])
+    for c in range(x1.shape[1]):
+        np.random.shuffle(ids)
+        x1[:,c] = x1[ids][:,c]
+    x[mask] = x1#[ids]
+    print(x[mask][0,-10:])
+    return x,y 
+
+def augment(x,y,t=2):
+    xs,xn = [],[]
+    for i in range(t):
+        mask = y>0
+        x1 = x[mask].copy()
+        ids = np.arange(x1.shape[0])
+        for c in range(x1.shape[1]):
+            np.random.shuffle(ids)
+            x1[:,c] = x1[ids][:,c]
+        xs.append(x1)
+
+    for i in range(t//2):
+        mask = y==0
+        x1 = x[mask].copy()
+        ids = np.arange(x1.shape[0])
+        for c in range(x1.shape[1]):
+            np.random.shuffle(ids)
+            x1[:,c] = x1[ids][:,c]
+        xn.append(x1)
+
+    xs = np.vstack(xs)
+    xn = np.vstack(xn)
+    ys = np.ones(xs.shape[0])
+    yn = np.zeros(xn.shape[0])
+    x = np.vstack([x,xs,xn])
+    y = np.concatenate([y,ys,yn])
+    return x,y
+
 def run_cv_sub(X,y,folds,names,xid,rs=126,model_name='nn',Xt=None,leak=False):
     global FOLD
     ypred = np.zeros_like(y)*1.0
@@ -391,6 +445,9 @@ def run_cv_sub(X,y,folds,names,xid,rs=126,model_name='nn',Xt=None,leak=False):
         FOLD = i
         y_train,y_test = y[train_index],y[test_index]
         X_train,X_test = X[train_index], X[test_index]
+
+        #X_train,y_train = one_zero_shuffle(X_train,y_train)
+        #X_train,y_train = augment(X_train,y_train)
         yp,ysub,model = run_one_fold(X_train,y_train,X_test,y_test,model_name,Xt,leak,names,ysub)
         loss = get_score(y_test,yp,METRIC)
         scores.append(loss)
@@ -473,7 +530,7 @@ def get_bag_xgb_model(names,num_class):
     #})
     #xgb_params['folds'] = 4
     #xgb_params['num_round'] = 500
-    #xgb_params['ranknorm'] = True
+    xgb_params['aug'] = augment 
     print(xgb_params)
     model = bag_xgb_model(**xgb_params)
     return model
@@ -567,7 +624,7 @@ def main(mode='cv',model='lgb',leak=False):
     tag = 'leak' if leak else 'non-leak'
     tag = '%s_%s_%s_%d'%(mode,tag,model,GPU)
     out = '%s.csv.gz'%tag
-    bl = [2,1]
+    bl = [1]
     cl = [0]*len(bl)
     if 0 in bl:
         tag = 'stack_%s'%tag
