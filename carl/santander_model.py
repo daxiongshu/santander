@@ -3,13 +3,14 @@ try:
     import nvstrings
     from librmm_cffi import librmm
     from nvstring_workaround import get_unique_tokens,on_gpu,get_token_counts,is_in
-    from cudf_workaround import unique,rename_col
+    from cudf_workaround import unique,rename_col,to_pandas,merge
 except:
     print('cudf not imported')
 
 import glob
 from scipy import sparse
 from sklearn.preprocessing import StandardScaler,QuantileTransformer
+from sklearn.model_selection import train_test_split
 import time
 from ml_robot import timer,bag_xgb_model,xgb_model,lgb_model,bag_lgb_model,write_log,sk_lgb_model,bag_sk_lgb_model
 from ml_robot.metrics import get_score
@@ -141,6 +142,9 @@ def build1(mode):
     badcols = []#['var_37']
     gtr = rm_cols(gtr,[IDCOL,YCOL]+badcols)
     gte = rm_cols(gte,[IDCOL,YCOL]+badcols)
+    #gtr = gtr[['var_12','var_81']]
+    #gte = gte[['var_12','var_81']]
+    #gtr['var_12'] = gtr['var_12']*100
     print("build1",len(gtr),len(gte))
     return post_gdf(gtr,gte)
 
@@ -170,13 +174,13 @@ def build3(mode):
     x = np.vstack([x,xt])
     scaler = StandardScaler()
     x = scaler.fit_transform(x)
-    x,xt = x[:N],x[N:]
-
-    x.sort(axis=1)
-    xt.sort(axis=1)
-    print(x[0,-10:])
-    M = 10
-    return x[:,-M:],xt[:,-M:],['max_%d'%i for i in range(M,0,-1)]
+    #x,xt = x[:N],x[N:]
+    #return x,xt,names
+    #x.sort(axis=1)
+    #xt.sort(axis=1)
+    #print(x[0,-10:])
+    #M = 10
+    #return x[:,-M:],xt[:,-M:],['max_%d'%i for i in range(M,0,-1)]
     for i in range(x.shape[1]):
         x[:,i] = x[:,i].argsort().argsort()
     funcs = ['std']
@@ -390,10 +394,10 @@ def one_zero_shuffle(x,y):
     x = x.copy()
     mask = y>0
     x1 = x[mask].copy()
-    #x1 = x1.T
-    #np.random.shuffle(x1)
-    #x[mask] = x1.T
-    #return x,y
+    x1 = x1.T
+    np.random.shuffle(x1)
+    x[mask] = x1.T
+    return x,y
     print(x[mask][0,-10:])
     ids = np.arange(x1.shape[0])
     for c in range(x1.shape[1]):
@@ -403,7 +407,7 @@ def one_zero_shuffle(x,y):
     print(x[mask][0,-10:])
     return x,y 
 
-def augment(x,y,t=2):
+def augment(x,y,t=1):
     xs,xn = [],[]
     for i in range(t):
         mask = y>0
@@ -424,31 +428,85 @@ def augment(x,y,t=2):
         xn.append(x1)
 
     xs = np.vstack(xs)
-    xn = np.vstack(xn)
-    ys = np.ones(xs.shape[0])
-    yn = np.zeros(xn.shape[0])
-    x = np.vstack([x,xs,xn])
-    y = np.concatenate([y,ys,yn])
+    #xn = np.vstack(xn)
+    ys = np.ones(xs.shape[0])#*0.9
+    #yn = np.zeros(xn.shape[0])#*0.1
+    x = np.vstack([x,xs])#,xn])
+    y = np.concatenate([y,ys])#,yn])
     return x,y
+
+@timer
+def add_distance(x,y,xt,xte,funcs):
+    ids = np.arange(x.shape[0])
+    x1,x2,y1,y2 = train_test_split(ids,y, test_size=0.5, random_state=42,stratify=y)
+    #funcs = ['mean','min']    
+
+    xnew = np.zeros([x.shape[0],len(funcs)])    
+    xtnew = np.zeros([xt.shape[0],len(funcs)])
+
+    x2_pos = x[x2][y2==1]
+    xnew[x1] = _add_distance(x[x1], x2_pos, funcs)
+
+    x1_pos = x[x1][y1==1]
+    xnew[x2] = _add_distance(x[x2], x1_pos, funcs)
+
+    x_pos = x[y==1]
+    xtnew = _add_distance(xt, x_pos, funcs)
+    xtenew = _add_distance(xte, x_pos, funcs)
+
+    return xnew,xtnew,xtenew
+
+def _add_distance(x,base,funcs):
+    B = 10000
+    res = []
+    base = np.expand_dims(base,0)
+    for i in range(0,x.shape[0],B):
+        s,e = i,min(i+B,x.shape[0])
+        xm = x[s:e]
+        xm = np.expand_dims(xm,1)
+        dist = xm-base
+        dist = np.sum(dist*dist,axis=2)
+        #print(xm.shape,base.shape,dist.shape)
+        s = pd.DataFrame()
+        for func in funcs:
+            s[func] = eval('np.%s(dist,axis=1)'%func)
+        res.append(s.values)
+        if i%100 == 0:
+            print(i,'done')
+    return np.vstack(res)
+   
 
 def run_cv_sub(X,y,folds,names,xid,rs=126,model_name='nn',Xt=None,leak=False):
     global FOLD
     ypred = np.zeros_like(y)*1.0
     scores = []
     ysub = 0
-
+    Xt0 = Xt
     splits = []
     #kf = KFold(n_splits=folds, shuffle=True, random_state=rs)
-    kf = StratifiedKFold(n_splits=folds, shuffle=True, random_state=rs)
-    for i,(train_index, test_index) in enumerate(kf.split(X,y,xid)):
+    #kf = StratifiedKFold(n_splits=folds, shuffle=True, random_state=rs)
+    kf = pickle.load(open('cache/kfolds.pkl','rb'))
+    #for i,(train_index, test_index) in enumerate(kf.split(X,y,xid)):
+    for i,(train_index, test_index) in enumerate(kf):
         splits.append((train_index, test_index))
         FOLD = i
         y_train,y_test = y[train_index],y[test_index]
         X_train,X_test = X[train_index], X[test_index]
 
         #X_train,y_train = one_zero_shuffle(X_train,y_train)
-        #X_train,y_train = augment(X_train,y_train)
-        yp,ysub,model = run_one_fold(X_train,y_train,X_test,y_test,model_name,Xt,leak,names,ysub)
+        yp,ysubc = 0,0
+        N = 1 
+        for c in range(N):
+            #X_train0,y_train0 = augment(X_train,y_train)
+            #X_train0,y_train0 = X_train,y_train
+            X_train0,X_test0,Xt0 = mtr_encodes(X_train.copy(),y_train.copy(),X_test.copy(),Xt.copy())
+            #X_train0,y_train0 = augment(X_train0,y_train0)
+            names0 = ['mtr_%s'%i for i in names]+names
+            ypc,ysubc,model = run_one_fold(X_train0,y_train,X_test0,y_test,model_name,Xt0,leak,names0,ysubc)
+            yp+=ypc
+            ysub+=ysubc
+        yp/=N
+        ysub/=N
         loss = get_score(y_test,yp,METRIC)
         scores.append(loss)
         ypred[test_index] = yp
@@ -457,12 +515,106 @@ def run_cv_sub(X,y,folds,names,xid,rs=126,model_name='nn',Xt=None,leak=False):
         fo.write('Fold: %d %s:%.5f\n'%(i,METRIC,scores[-1]))
         fo.close()
     if ysub is not None:
-        ysub/=folds
+        ysub/=(i+1)
     score = get_score(y,ypred,METRIC)
     scores = ['%.4f'%i for i in scores]+['ave:%.4f'%np.mean(scores),'std:%.3f'%np.std(scores)]
     if os.path.exists('%s/splits.p'%CACHE)==0:
         pickle.dump(splits,open('%s/splits.p'%CACHE,'wb'))
     return scores,score,ypred,ysub,model 
+
+def mtr_encodes(x,y,xt,xte):
+    x0,xt0,xte0 = x.copy(),xt.copy(),xte.copy()
+    for i in range(x.shape[1]):
+        a,b,c = mtr_encode(x[:,i:i+1],y,xt[:,i:i+1],xte[:,i:i+1])
+        x[:,i],xt[:,i],xte[:,i] = a[:,0],b[:,0],c[:,0]
+    x = np.hstack([x,x0])
+    xt = np.hstack([xt,xt0])
+    xte = np.hstack([xte,xte0])
+    return x,xt,xte
+
+def mtr_encode(x,y,xt,xte):
+    ids = np.arange(x.shape[0])
+    x1,x2,y1,y2 = train_test_split(ids,y, test_size=0.5, random_state=42,stratify=y)
+    #funcs = ['mean','min']    
+
+    xnew = np.zeros([x.shape[0],1])
+    _,xnew[x2],_ = mtr_gd(x[x1],y[x1],x[x2],None)
+    _,xnew[x1],_ = mtr_gd(x[x2],y[x2],x[x1],None)
+    _,xt,xte = mtr_gd(x,y,xt,xte)
+    return xnew,xt,xte
+
+def mtr(x,y,xt,xte):
+    s = pd.DataFrame(x,columns=['x'])
+    s['y'] = y
+    df = s.groupby('x').agg({'y':'mean'})
+    df.columns = ['mean']
+    df = df.reset_index()
+    dg = pd.DataFrame(np.unique(xt),columns=['x'])
+    df = df.merge(dg,on='x',how='left')
+    if xte is not None:
+        dg = pd.DataFrame(np.unique(xte),columns=['x'])
+        df = df.merge(dg,on='x',how='left')
+    df = df.sort_values('x')
+    df['mean'] = df['mean'].interpolate()
+    df['mean'] = df['mean'].rolling(df.shape[0]//100).mean() 
+    tr = pd.DataFrame(x,columns=['x'])
+    tr = tr.merge(df,on='x',how='left')
+    te = pd.DataFrame(xt,columns=['x'])
+    te = te.merge(df,on='x',how='left')
+    if xte is not None:
+        tes = pd.DataFrame(xte,columns=['x'])
+        tes = tes.merge(df,on='x',how='left')
+        xte = tes[['mean']].values
+    return tr[['mean']].values,te[['mean']].values,xte
+
+def mtr_gd(x,y,xt,xte):
+    col = 'mean_y'
+    tr = gd.DataFrame()
+    tr['y'] = y.astype(np.float32)
+    tr['x'] = np.ascontiguousarray(x[:,0])
+    df = tr.groupby('x').agg({'y':'mean'})
+
+    dg = gd.DataFrame()
+    dg['x'] = np.unique(xt[:,0])
+    df = merge(df,dg,on='x',how='left')
+    del dg
+    if xte is not None:
+        dg = gd.DataFrame()
+        dg['x'] = np.unique(xte[:,0])
+        df = merge(df,dg,on='x',how='left')
+        del dg
+    df = df.sort_values('x')
+
+    df = to_pandas(df)
+    df[col] = df[col].interpolate()
+    df[col] = df[col].rolling(1000).mean()
+
+    df = gd.from_pandas(df)
+    tr = merge(tr,df,on='x',how='left')
+
+    te = gd.DataFrame()
+    te['x'] = np.ascontiguousarray(xt[:,0])
+    te = merge(te,df,on='x',how='left')
+
+    if xte is not None:
+        tes = gd.DataFrame()
+        tes['x'] = np.ascontiguousarray(xte[:,0])
+        tes = merge(tes,df,on='x',how='left')
+        xte = to_pandas(tes)
+        print('test null ratio %.4f'%(xte[col].isnull().sum()*1.0/xte.shape[0]))
+        f = open('tmp','a')
+        f.write('test null ratio %.4f\n'%(xte[col].isnull().sum()*1.0/xte.shape[0]))
+        f.close()
+        xte = xte[[col]].values
+        del tes
+    xt = to_pandas(te)
+    print('valid null ratio %.4f'%(xt[col].isnull().sum()*1.0/xt.shape[0]))
+    f = open('tmp','a')
+    f.write('valid null ratio %.4f\n\n'%(xt[col].isnull().sum()*1.0/xt.shape[0]))
+    f.close()
+    x,xt = to_pandas(tr)[[col]].values,xt[[col]].values
+    del df,tr,te
+    return x,xt,xte
 
 def run_one_fold(X_train,y_train,X_test,y_test,model_name,Xt,leak,names,ysub):
     if leak:
@@ -515,8 +667,8 @@ def get_nn_params(H,catfeas,num_class):
         'Hs':[H],#,H//2,H//4],
         'drop_prob':0,#0.5,
         'early_stopping_epochs':5,
-        'learning_rate':0.01,
-        'batch_size':102400,
+        'learning_rate':0.001,
+        'batch_size':2048,
         #'verbosity':10,
         'folds':4,
     }
@@ -568,6 +720,7 @@ def get_xgb_cpu_params(names,num_class):
     #categorical = get_categorical_columns(names)
     params =  {
         'objective': 'binary:logistic',
+        #'objective':'reg:linear',
         'tree_method': 'hist',
         'early_stopping_rounds':100,#None,
         'eta':0.1,
@@ -618,6 +771,7 @@ def main(mode='cv',model='lgb',leak=False):
     global MODE
     MODE = mode
     cname = sys.argv[0].replace('.py','_%d.py'%GPU)
+    assert os.path.exists(cname)==0
     cmd = 'cp %s %s'%(sys.argv[0],cname)
     os.system(cmd)
     start = time.time()
