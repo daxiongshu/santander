@@ -29,13 +29,13 @@ SAVE = False
 WORK = '/raid/data/ml/santander'
 CACHE = '%s/code/cache'%WORK
 PATH = '%s/input'%WORK
-RANKNORM = 1
+RANKNORM = 1 
 METRIC = 'auc'
 IDCOL = 'ID_code'
 YCOL = 'target'
 NUM_CLASS=1
 MODE = None
-GPU = 0
+GPU = 7 
 if len(sys.argv)==2 and sys.argv[0].endswith('.py'):
     GPU = int(sys.argv[1])
     print('Reset GPU',GPU)
@@ -495,13 +495,21 @@ def run_cv_sub(X,y,folds,names,xid,rs=126,model_name='nn',Xt=None,leak=False):
 
         #X_train,y_train = one_zero_shuffle(X_train,y_train)
         yp,ysubc = 0,0
-        N = 1 
-        for c in range(N):
+        N = 1
+        #tags = ['mean','std'] 
+        for _ in range(N):
             #X_train0,y_train0 = augment(X_train,y_train)
             #X_train0,y_train0 = X_train,y_train
             X_train0,X_test0,Xt0 = mtr_encodes(X_train.copy(),y_train.copy(),X_test.copy(),Xt.copy())
-            #X_train0,y_train0 = augment(X_train0,y_train0)
-            names0 = ['mtr_%s'%i for i in names]+names
+            X_train0,y_train = augment(X_train0,y_train)
+            nf = X_train0.shape[1]//X.shape[1]-1
+            #names0 = ['%s_%d'%(i) for c,i in enumerate(names)]+names
+            names0 = names.copy()
+            for na in names:
+                for c in range(nf):
+                    names0.append('%s_%d'%(na,c))# = names0+['%s_%d'%(j,c) for j in names]#+names0
+            print(len(names0),X_train0.shape[1])
+            assert len(names0) == X_train0.shape[1]
             ypc,ysubc,model = run_one_fold(X_train0,y_train,X_test0,y_test,model_name,Xt0,leak,names0,ysubc)
             yp+=ypc
             ysub+=ysubc
@@ -524,12 +532,16 @@ def run_cv_sub(X,y,folds,names,xid,rs=126,model_name='nn',Xt=None,leak=False):
 
 def mtr_encodes(x,y,xt,xte):
     x0,xt0,xte0 = x.copy(),xt.copy(),xte.copy()
-    for i in range(x.shape[1]):
-        a,b,c = mtr_encode(x[:,i:i+1],y,xt[:,i:i+1],xte[:,i:i+1])
-        x[:,i],xt[:,i],xte[:,i] = a[:,0],b[:,0],c[:,0]
-    x = np.hstack([x,x0])
-    xt = np.hstack([xt,xt0])
-    xte = np.hstack([xte,xte0])
+    x,xt,xte = [x0],[xt0],[xte0]
+    for i in range(x0.shape[1]):
+        a,b,c = mtr_encode(x0[:,i:i+1],y,xt0[:,i:i+1],xte0[:,i:i+1])
+        #x[:,i],xt[:,i],xte[:,i] = a[:,0],b[:,0],c[:,0]
+        x.append(a)
+        xt.append(b)
+        xte.append(c)
+    x = np.hstack(x)
+    xt = np.hstack(xt)
+    xte = np.hstack(xte)
     return x,xt,xte
 
 def mtr_encode(x,y,xt,xte):
@@ -537,7 +549,7 @@ def mtr_encode(x,y,xt,xte):
     x1,x2,y1,y2 = train_test_split(ids,y, test_size=0.5, random_state=42,stratify=y)
     #funcs = ['mean','min']    
 
-    xnew = np.zeros([x.shape[0],1])
+    xnew = np.zeros([x.shape[0],2])
     _,xnew[x2],_ = mtr_gd(x[x1],y[x1],x[x2],None)
     _,xnew[x1],_ = mtr_gd(x[x2],y[x2],x[x1],None)
     _,xt,xte = mtr_gd(x,y,xt,xte)
@@ -587,8 +599,11 @@ def mtr_gd(x,y,xt,xte):
 
     df = to_pandas(df)
     df[col] = df[col].interpolate()
-    df[col] = df[col].rolling(1000).mean()
-
+    #df[col] = df[col].rolling(1000,center=False,win_type='hamming').mean()
+    #df['std'] = df[col].rolling(500,center=False,win_type='hamming').mean()
+    df[col] = df[col].rolling(1000,min_periods=1).mean()
+    df['std'] = df[col].rolling(500,min_periods=1).mean()
+    #df['xx'] = df[col].rolling(250).mean()
     df = gd.from_pandas(df)
     tr = merge(tr,df,on='x',how='left')
 
@@ -596,6 +611,7 @@ def mtr_gd(x,y,xt,xte):
     te['x'] = np.ascontiguousarray(xt[:,0])
     te = merge(te,df,on='x',how='left')
 
+    cols = [col,'std']#,'xx']
     if xte is not None:
         tes = gd.DataFrame()
         tes['x'] = np.ascontiguousarray(xte[:,0])
@@ -605,14 +621,14 @@ def mtr_gd(x,y,xt,xte):
         f = open('tmp','a')
         f.write('test null ratio %.4f\n'%(xte[col].isnull().sum()*1.0/xte.shape[0]))
         f.close()
-        xte = xte[[col]].values
+        xte = xte[cols].values
         del tes
     xt = to_pandas(te)
     print('valid null ratio %.4f'%(xt[col].isnull().sum()*1.0/xt.shape[0]))
     f = open('tmp','a')
     f.write('valid null ratio %.4f\n\n'%(xt[col].isnull().sum()*1.0/xt.shape[0]))
     f.close()
-    x,xt = to_pandas(tr)[[col]].values,xt[[col]].values
+    x,xt = to_pandas(tr)[cols].values,xt[cols].values
     del df,tr,te
     return x,xt,xte
 
@@ -700,18 +716,27 @@ def get_sk_lgb_model(names,num_class):
     return model
 
 def get_sk_lgb_params(names,num_class):
+    random_state = 42
     params = {
-        "max_depth":-1,
-        "n_estimators":30000,
-        "learning_rate":0.05,
-        "num_leaves":64,
-        "colsample_bytree":0.3,
-        "objective":'binary',
-        "eval_metric":'auc',
-        "n_jobs":16,
-        "verbose":100,
-        "max_depth":1,
-        "early_stopping_rounds":200
+    "objective" : "binary",
+    "metric" : "auc",
+    "boosting": 'gbdt',
+    "max_depth" : -1,
+    "num_threads": 16,
+    "num_leaves" : 13,
+    "learning_rate" : 0.01,
+    "bagging_freq": 5,
+    "bagging_fraction" : 0.4,
+    "feature_fraction" : 0.05,
+    "min_data_in_leaf": 80,
+    "min_sum_heassian_in_leaf": 10,
+    "tree_learner": "serial",
+    "boost_from_average": "false",
+    #"lambda_l1" : 5,
+    #"lambda_l2" : 5,
+    "bagging_seed" : random_state,
+    "verbosity" : 1,
+    "seed": random_state
     }
     return params
 
