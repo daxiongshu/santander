@@ -546,12 +546,14 @@ def mtr_encodes(x0,y,xt0,xte0,names):
     return x,xt,xte,out
 
 def mtr_encode(x,y,xt,xte):
-    xnew = np.zeros([x.shape[0],2])
+    xnew = None
     kf = StratifiedKFold(n_splits=4, shuffle=True, random_state=128)
     for i,(x1,x2) in enumerate(kf.split(x,y)):
         _,b,_ = mtr_gd(x[x1],y[x1],x[x2],None)
         if b is None:
             return None,None,None
+        if xnew is None:
+            xnew = np.zeros([x.shape[0],b.shape[1]])
         xnew[x2] = b
 
     _,b,c = mtr_gd(x,y,xt,xte)
@@ -594,12 +596,14 @@ def mtr_gd(x,y,xt,xte):
     df = df.sort_values('x')
 
     df = to_pandas(df)
-    df[col] = df[col].interpolate()
-    #df[col] = df[col].rolling(1000,center=False,win_type='hamming').mean()
-    #df['std'] = df[col].rolling(500,center=False,win_type='hamming').mean()
-    df[col] = df[col].rolling(1000,min_periods=2).mean()
-    df['std'] = df[col].rolling(500,min_periods=2).mean()
-    #df['xx'] = df[col].rolling(250).mean()
+    cols = []
+    for i in [df.shape[0]//20,df.shape[0]//50]:
+        for j in [2]:
+            for z in ['mean']:
+                nx = '%s_%d_%d'%(z,i,j)
+                df[nx] = eval('df[col].rolling(i,min_periods=j).%s()'%z)#.sum()#mean()
+                cols.append(nx)
+
     df = gd.from_pandas(df)
     tr = merge(tr,df,on='x',how='left')
 
@@ -607,7 +611,6 @@ def mtr_gd(x,y,xt,xte):
     te['x'] = np.ascontiguousarray(xt[:,0])
     te = merge(te,df,on='x',how='left')
 
-    cols = [col,'std']#,'xx']
     if xte is not None:
         tes = gd.DataFrame()
         tes['x'] = np.ascontiguousarray(xte[:,0])
