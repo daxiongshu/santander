@@ -500,14 +500,10 @@ def run_cv_sub(X,y,folds,names,xid,rs=126,model_name='nn',Xt=None,leak=False):
         for _ in range(N):
             #X_train0,y_train0 = augment(X_train,y_train)
             #X_train0,y_train0 = X_train,y_train
-            X_train0,X_test0,Xt0 = mtr_encodes(X_train.copy(),y_train.copy(),X_test.copy(),Xt.copy())
+            X_train0,X_test0,Xt0,names0 = mtr_encodes(X_train.copy(),y_train.copy(),X_test.copy(),Xt.copy(),names)
             X_train0,y_train = augment(X_train0,y_train)
             nf = X_train0.shape[1]//X.shape[1]-1
             #names0 = ['%s_%d'%(i) for c,i in enumerate(names)]+names
-            names0 = names.copy()
-            for na in names:
-                for c in range(nf):
-                    names0.append('%s_%d'%(na,c))# = names0+['%s_%d'%(j,c) for j in names]#+names0
             print(len(names0),X_train0.shape[1])
             assert len(names0) == X_train0.shape[1]
             ypc,ysubc,model = run_one_fold(X_train0,y_train,X_test0,y_test,model_name,Xt0,leak,names0,ysubc)
@@ -519,8 +515,8 @@ def run_cv_sub(X,y,folds,names,xid,rs=126,model_name='nn',Xt=None,leak=False):
         scores.append(loss)
         ypred[test_index] = yp
         print('Fold: %d %s:%.5f'%(i,METRIC,scores[-1]))
-        fo = open('tmp','a')
-        fo.write('Fold: %d %s:%.5f\n'%(i,METRIC,scores[-1]))
+        fo = open('cv.score','a')
+        fo.write('GPU: %d Fold: %d %s:%.5f\n'%(GPU,i,METRIC,scores[-1]))
         fo.close()
     if ysub is not None:
         ysub/=(i+1)
@@ -530,29 +526,38 @@ def run_cv_sub(X,y,folds,names,xid,rs=126,model_name='nn',Xt=None,leak=False):
         pickle.dump(splits,open('%s/splits.p'%CACHE,'wb'))
     return scores,score,ypred,ysub,model 
 
-def mtr_encodes(x,y,xt,xte):
-    x0,xt0,xte0 = x.copy(),xt.copy(),xte.copy()
+def mtr_encodes(x0,y,xt0,xte0,names):
     x,xt,xte = [x0],[xt0],[xte0]
+    out = names.copy()
     for i in range(x0.shape[1]):
+        if i in [10,14,17,29,30,38,39,41,42,46,47,61,64,65,68,69,72,73,79,84,96,98,100,103,117,120,124,126,129,136,140,152,158,160,161,176,182,183,185,189]:
+            continue
         a,b,c = mtr_encode(x0[:,i:i+1],y,xt0[:,i:i+1],xte0[:,i:i+1])
         #x[:,i],xt[:,i],xte[:,i] = a[:,0],b[:,0],c[:,0]
+        if a is None:
+            continue
+        out.extend(['mtr_%s_%d'%(names[i],j) for j in range(a.shape[1])])
         x.append(a)
         xt.append(b)
         xte.append(c)
     x = np.hstack(x)
     xt = np.hstack(xt)
     xte = np.hstack(xte)
-    return x,xt,xte
+    return x,xt,xte,out
 
 def mtr_encode(x,y,xt,xte):
-    ids = np.arange(x.shape[0])
-    x1,x2,y1,y2 = train_test_split(ids,y, test_size=0.5, random_state=42,stratify=y)
-    #funcs = ['mean','min']    
-
     xnew = np.zeros([x.shape[0],2])
-    _,xnew[x2],_ = mtr_gd(x[x1],y[x1],x[x2],None)
-    _,xnew[x1],_ = mtr_gd(x[x2],y[x2],x[x1],None)
-    _,xt,xte = mtr_gd(x,y,xt,xte)
+    kf = StratifiedKFold(n_splits=4, shuffle=True, random_state=128)
+    for i,(x1,x2) in enumerate(kf.split(x,y)):
+        _,b,_ = mtr_gd(x[x1],y[x1],x[x2],None)
+        if b is None:
+            return None,None,None
+        xnew[x2] = b
+
+    _,b,c = mtr_gd(x,y,xt,xte)
+    if b is None:
+        return None,None,None
+    xt,xte = b,c
     return xnew,xt,xte
 
 def mtr(x,y,xt,xte):
@@ -586,23 +591,14 @@ def mtr_gd(x,y,xt,xte):
     tr['x'] = np.ascontiguousarray(x[:,0])
     df = tr.groupby('x').agg({'y':'mean'})
 
-    dg = gd.DataFrame()
-    dg['x'] = np.unique(xt[:,0])
-    df = merge(df,dg,on='x',how='left')
-    del dg
-    if xte is not None:
-        dg = gd.DataFrame()
-        dg['x'] = np.unique(xte[:,0])
-        df = merge(df,dg,on='x',how='left')
-        del dg
     df = df.sort_values('x')
 
     df = to_pandas(df)
     df[col] = df[col].interpolate()
     #df[col] = df[col].rolling(1000,center=False,win_type='hamming').mean()
     #df['std'] = df[col].rolling(500,center=False,win_type='hamming').mean()
-    df[col] = df[col].rolling(1000,min_periods=1).mean()
-    df['std'] = df[col].rolling(500,min_periods=1).mean()
+    df[col] = df[col].rolling(1000,min_periods=2).mean()
+    df['std'] = df[col].rolling(500,min_periods=2).mean()
     #df['xx'] = df[col].rolling(250).mean()
     df = gd.from_pandas(df)
     tr = merge(tr,df,on='x',how='left')
@@ -617,10 +613,13 @@ def mtr_gd(x,y,xt,xte):
         tes['x'] = np.ascontiguousarray(xte[:,0])
         tes = merge(tes,df,on='x',how='left')
         xte = to_pandas(tes)
-        print('test null ratio %.4f'%(xte[col].isnull().sum()*1.0/xte.shape[0]))
+        ratio = xte[col].isnull().sum()*1.0/xte.shape[0]
+        print('test null ratio %.4f'%(ratio))
         f = open('tmp','a')
-        f.write('test null ratio %.4f\n'%(xte[col].isnull().sum()*1.0/xte.shape[0]))
+        f.write('test null ratio %.4f\n'%(ratio))
         f.close()
+        #if ratio>0.5:
+        #    return None,None,None
         xte = xte[cols].values
         del tes
     xt = to_pandas(te)
@@ -715,6 +714,11 @@ def get_sk_lgb_model(names,num_class):
     model = sk_lgb_model(**lgb_params)
     return model
 
+def get_lgb_model(names,num_class):
+    lgb_params = get_sk_lgb_params(names,num_class)
+    model = lgb_model(**lgb_params)
+    return model
+
 def get_sk_lgb_params(names,num_class):
     random_state = 42
     params = {
@@ -729,7 +733,7 @@ def get_sk_lgb_params(names,num_class):
     "bagging_fraction" : 0.4,
     "feature_fraction" : 0.05,
     "min_data_in_leaf": 80,
-    "min_sum_heassian_in_leaf": 10,
+    "min_sum_hessian_in_leaf": 10,
     "tree_learner": "serial",
     "boost_from_average": "false",
     #"lambda_l1" : 5,
@@ -750,10 +754,11 @@ def get_xgb_cpu_params(names,num_class):
         'early_stopping_rounds':100,#None,
         'eta':0.1,
         'nthread': 16,
+        'stratified':True,
         'folds':4,
         'watch':True,#False,
         'num_class':num_class,
-        'num_round':12000,
+        'num_round':120000,
         'max_depth': 1,#5 if 'stack' not in MODE else 1,
         'silent':1,
         'subsample':0.5,
