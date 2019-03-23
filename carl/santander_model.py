@@ -596,14 +596,19 @@ def mtr_gd(x,y,xt,xte):
     df = df.sort_values('x')
 
     df = to_pandas(df)
+    #df = df.set_index('x')
     cols = []
-    for i in [df.shape[0]//20,df.shape[0]//50]:
-        for j in [2]:
+    for i in [df.shape[0]//2,df.shape[0]//20]:
+        for j in [1]:
             for z in ['mean']:
+                if j is None:
+                    j=i
                 nx = '%s_%d_%d'%(z,i,j)
-                df[nx] = eval('df[col].rolling(i,min_periods=j).%s()'%z)#.sum()#mean()
+                df[nx] = eval("df[col].rolling(i,min_periods=j,center=True).%s()"%z)#.sum()#mean()
                 cols.append(nx)
-
+    #df = df.reset_index()
+    for i in df.columns:
+        df[i] = df[i].astype(np.float32)
     df = gd.from_pandas(df)
     tr = merge(tr,df,on='x',how='left')
 
