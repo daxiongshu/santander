@@ -23,7 +23,7 @@ import re
 from sklearn.model_selection import KFold,StratifiedKFold
 import pickle
 
-
+FDIC = {}
 FOLDS = 4
 SAVE = False
 WORK = '/raid/data/ml/santander'
@@ -142,8 +142,14 @@ def build1(mode):
     badcols = []#['var_37']
     gtr = rm_cols(gtr,[IDCOL,YCOL]+badcols)
     gte = rm_cols(gte,[IDCOL,YCOL]+badcols)
-    #gtr = gtr[['var_12','var_81']]
-    #gte = gte[['var_12','var_81']]
+
+    cols = ['var_12','var_81']
+    #cols = ['var_20', 'var_21']
+    #cols += ['var_7', 'var_8']
+    #cols += ['var_10']
+    #cols += ['var_70','var_74']
+    #gtr,gte = gtr[cols],gte[cols]
+
     #gtr['var_12'] = gtr['var_12']*100
     print("build1",len(gtr),len(gte))
     return post_gdf(gtr,gte)
@@ -407,6 +413,35 @@ def one_zero_shuffle(x,y):
     print(x[mask][0,-10:])
     return x,y 
 
+def augment_fix(x,y,t=1):
+    xs,xn = [],[]
+    for i in range(t):
+        mask = y>0
+        x1 = x[mask].copy()
+        ids = np.arange(x1.shape[0])
+        for k,v in FDIC.items():
+            np.random.shuffle(ids)
+            x1[:,v] = x1[ids][:,v]
+        xs.append(x1)
+
+    for i in range(0):
+        mask = (y==0)
+        mask = mask&(np.random.rand(mask.shape[0])<0.1)
+        x1 = x[mask].copy()
+        ids = np.arange(x1.shape[0])
+        for k,v in FDIC.items():
+            np.random.shuffle(ids)
+            x1[:,v] = x1[ids][:,v]
+        xn.append(x1)
+
+    xs = np.vstack(xs)
+    #xn = np.vstack(xn)
+    ys = np.ones(xs.shape[0])#*0.9
+    #yn = np.zeros(xn.shape[0])#*0.1
+    x = np.vstack([x,xs])#,xn])
+    y = np.concatenate([y,ys])#,yn])
+    return x,y
+
 def augment(x,y,t=1):
     xs,xn = [],[]
     for i in range(t):
@@ -501,7 +536,7 @@ def run_cv_sub(X,y,folds,names,xid,rs=126,model_name='nn',Xt=None,leak=False):
             #X_train0,y_train0 = augment(X_train,y_train)
             #X_train0,y_train0 = X_train,y_train
             X_train0,X_test0,Xt0,names0 = mtr_encodes(X_train.copy(),y_train.copy(),X_test.copy(),Xt.copy(),names)
-            X_train0,y_train = augment(X_train0,y_train)
+            X_train0,y_train = augment_fix(X_train0,y_train)
             nf = X_train0.shape[1]//X.shape[1]-1
             #names0 = ['%s_%d'%(i) for c,i in enumerate(names)]+names
             print(len(names0),X_train0.shape[1])
@@ -527,15 +562,20 @@ def run_cv_sub(X,y,folds,names,xid,rs=126,model_name='nn',Xt=None,leak=False):
     return scores,score,ypred,ysub,model 
 
 def mtr_encodes(x0,y,xt0,xte0,names):
+    global FDIC
     x,xt,xte = [x0],[xt0],[xte0]
     out = names.copy()
+    fc = x0.shape[1]
     for i in range(x0.shape[1]):
+        FDIC[i] = [i]
         if i in [10,14,17,29,30,38,39,41,42,46,47,61,64,65,68,69,72,73,79,84,96,98,100,103,117,120,124,126,129,136,140,152,158,160,161,176,182,183,185,189]:
             continue
         a,b,c = mtr_encode(x0[:,i:i+1],y,xt0[:,i:i+1],xte0[:,i:i+1])
         #x[:,i],xt[:,i],xte[:,i] = a[:,0],b[:,0],c[:,0]
         if a is None:
             continue
+        FDIC[fc] = [fc+j for j in range(a.shape[1])]
+        fc += a.shape[1]
         out.extend(['mtr_%s_%d'%(names[i],j) for j in range(a.shape[1])])
         x.append(a)
         xt.append(b)
@@ -547,7 +587,7 @@ def mtr_encodes(x0,y,xt0,xte0,names):
 
 def mtr_encode(x,y,xt,xte):
     xnew = None
-    kf = StratifiedKFold(n_splits=4, shuffle=True, random_state=128)
+    kf = StratifiedKFold(n_splits=10, shuffle=True, random_state=128)
     for i,(x1,x2) in enumerate(kf.split(x,y)):
         _,b,_ = mtr_gd(x[x1],y[x1],x[x2],None)
         if b is None:
@@ -556,66 +596,58 @@ def mtr_encode(x,y,xt,xte):
             xnew = np.zeros([x.shape[0],b.shape[1]])
         xnew[x2] = b
 
-    _,b,c = mtr_gd(x,y,xt,xte)
+    a,b,c = mtr_gd(x,y,xt,xte)
+    #xnew = (xnew+a)*0.5
     if b is None:
         return None,None,None
     xt,xte = b,c
     return xnew,xt,xte
 
-def mtr(x,y,xt,xte):
-    s = pd.DataFrame(x,columns=['x'])
-    s['y'] = y
-    df = s.groupby('x').agg({'y':'mean'})
-    df.columns = ['mean']
-    df = df.reset_index()
-    dg = pd.DataFrame(np.unique(xt),columns=['x'])
-    df = df.merge(dg,on='x',how='left')
-    if xte is not None:
-        dg = pd.DataFrame(np.unique(xte),columns=['x'])
-        df = df.merge(dg,on='x',how='left')
-    df = df.sort_values('x')
-    df['mean'] = df['mean'].interpolate()
-    df['mean'] = df['mean'].rolling(df.shape[0]//100).mean() 
-    tr = pd.DataFrame(x,columns=['x'])
-    tr = tr.merge(df,on='x',how='left')
-    te = pd.DataFrame(xt,columns=['x'])
-    te = te.merge(df,on='x',how='left')
-    if xte is not None:
-        tes = pd.DataFrame(xte,columns=['x'])
-        tes = tes.merge(df,on='x',how='left')
-        xte = tes[['mean']].values
-    return tr[['mean']].values,te[['mean']].values,xte
-
 def mtr_gd(x,y,xt,xte):
-    col = 'mean_y'
+    col = 'sum_y'
     tr = gd.DataFrame()
     tr['y'] = y.astype(np.float32)
     tr['x'] = np.ascontiguousarray(x[:,0])
-    df = tr.groupby('x').agg({'y':'mean'})
+    std = tr['x'].std()
+
+    df = tr.groupby('x').agg({'y':['sum','count']})
+    colx = 'count_y'
+    df[colx] = df[colx].astype('float32')#/df[colx].max()
 
     df = df.sort_values('x')
 
     df = to_pandas(df)
     #df = df.set_index('x')
     cols = []
-    for i in [df.shape[0]//2,df.shape[0]//20]:
-        for j in [1]:
-            for z in ['mean']:
-                if j is None:
-                    j=i
-                nx = '%s_%d_%d'%(z,i,j)
-                df[nx] = eval("df[col].rolling(i,min_periods=j,center=True).%s()"%z)#.sum()#mean()
-                cols.append(nx)
+    df[col] = df[col].cumsum()
+    df[colx] = df[colx].cumsum()
+
+    """
+    if xte is not None:
+        x_all = np.vstack([xt,xte])[:,0]
+    else:
+        x_all = np.vstack([xt])[:,0]
+    x_all = np.unique(x_all)
+
+    dg = pd.DataFrame({'x':x_all})
+    """
+
+    for i in [2]:
+        tm = getp_vec_sum(df['x'].values,df['x'].values,df[col].values,std,c=i)
+        cm = getp_vec_sum(df['x'].values,df['x'].values,df[colx].values,std,c=i)+1
+        df[str(i)] = tm/cm
+        cols.append(str(i))
     #df = df.reset_index()
     for i in df.columns:
         df[i] = df[i].astype(np.float32)
     df = gd.from_pandas(df)
-    tr = merge(tr,df,on='x',how='left')
+    #tr = merge(tr,df,on='x',how='left')
 
     te = gd.DataFrame()
     te['x'] = np.ascontiguousarray(xt[:,0])
     te = merge(te,df,on='x',how='left')
 
+    col = cols[0]
     if xte is not None:
         tes = gd.DataFrame()
         tes['x'] = np.ascontiguousarray(xte[:,0])
@@ -635,9 +667,18 @@ def mtr_gd(x,y,xt,xte):
     f = open('tmp','a')
     f.write('valid null ratio %.4f\n\n'%(xt[col].isnull().sum()*1.0/xt.shape[0]))
     f.close()
-    x,xt = to_pandas(tr)[cols].values,xt[cols].values
+    xt = xt[cols].values
     del df,tr,te
-    return x,xt,xte
+    return None,xt,xte
+
+def getp_vec_sum(x,x_sort,y,std,c=0.5):
+    # x is sorted
+    left = x - std/c
+    right = x + std/c
+    p_left = np.searchsorted(x_sort,left)
+    p_right = np.searchsorted(x_sort,right)
+    p_right[p_right>=y.shape[0]] = y.shape[0]-1
+    return (y[p_right]-y[p_left])#/(p_right-p_left+1)
 
 def run_one_fold(X_train,y_train,X_test,y_test,model_name,Xt,leak,names,ysub):
     if leak:
@@ -705,7 +746,7 @@ def get_bag_xgb_model(names,num_class):
     #})
     #xgb_params['folds'] = 4
     #xgb_params['num_round'] = 500
-    xgb_params['aug'] = augment 
+    xgb_params['aug'] = augment_fix 
     print(xgb_params)
     model = bag_xgb_model(**xgb_params)
     return model
@@ -775,7 +816,7 @@ def get_xgb_cpu_params(names,num_class):
         'feature_names':names,
         'maximize':True,
         'eval_metric':METRIC,
-        'verbose_eval':100,
+        'verbose_eval':1000,
     }
     return params
 
